@@ -1,142 +1,662 @@
-import glob
+import csv
 import json
 import os
+import re
 import time
+import uuid
 
-import pandas as pd
-from kafka import KafkaProducer
+from datetime import datetime, timezone
+from pathlib import Path
+
+from confluent_kafka import Producer
 
 
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka1:9092,kafka2:9092,kafka3:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "ran-telemetry")
-SIMULATION_INTERVAL = float(os.getenv("SIMULATION_INTERVAL", "5"))
-DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Raw"))
-CSV_FILE = os.getenv("CSV_FILE")
+# ============================================================
+# Project Paths
+# ============================================================
 
-producer = KafkaProducer(
-    bootstrap_servers=KAFKA_BROKERS.split(","),
-    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
-    key_serializer=lambda key: key.encode("utf-8"),
-    acks="all",
-    retries=10,
-    linger_ms=10,
+DATA_DIR_ENV = os.getenv("DATA_DIR")
+
+if DATA_DIR_ENV:
+    DATA_DIR = Path(DATA_DIR_ENV)
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    DATA_DIR = PROJECT_ROOT / "data" / "Raw"
+
+# ============================================================
+# Kafka Configuration
+# ============================================================
+
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "kafka1:9092,kafka2:9092,kafka3:9092"
+)
+
+KAFKA_TOPIC = os.getenv(
+    "KAFKA_TOPIC",
+    "ran-telemetry"
 )
 
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
-    return df
+# ============================================================
+# Producer Runtime Configuration
+# ============================================================
+
+SEND_DELAY_SECONDS = float(
+    os.getenv("SEND_DELAY_SECONDS", "0")
+)
+
+MAX_EVENTS = int(
+    os.getenv("MAX_EVENTS", "0")
+)
+
+SOURCE_FILE = os.getenv(
+    "SOURCE_FILE", ""
+)
 
 
-def infer_network_type(file_path: str) -> str:
-    file_name = os.path.basename(file_path).upper()
-    if "LTE" in file_name:
-        return "LTE"
-    if "NR" in file_name:
-        return "NR"
-    if "GSM" in file_name:
-        return "GSM"
-    return "UNKNOWN"
+# ============================================================
+# Filename Pattern
+#
+# Examples:
+#
+# Dataset_01_LTE_2100.csv
+# Dataset_03_NR_3500.csv
+# Dataset_03_GSM_900.csv
+#
+# ============================================================
+
+FILENAME_PATTERN = re.compile(
+    r"^Dataset_(\d+)_(LTE|NR|GSM)_(\d+)\.csv$"
+)
 
 
-def parse_timestamp(value):
-    if pd.isna(value):
-        return pd.NaT
-    if isinstance(value, str):
-        value = value.strip()
-    try:
-        return pd.to_datetime(value, errors="coerce")
-    except Exception:
-        return pd.NaT
+# ============================================================
+# Common CSV Column Mapping
+# ============================================================
+
+COMMON_COLUMN_MAP = {
+    "Base station": "base_station",
+    "Sector": "sector",
+    "Timestamp": "event_timestamp",
+
+    "Radio unit energy consumption":
+        "radio_unit_energy_consumption",
+
+    "Baseband energy consumption":
+        "baseband_energy_consumption",
+}
 
 
-def collect_events_from_csv(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path, low_memory=False)
-    df = normalize_columns(df)
+# ============================================================
+# LTE / 4G Mapping
+# ============================================================
 
-    if "timestamp" not in df.columns:
-        if "time" in df.columns:
-            df = df.rename(columns={"time": "timestamp"})
-        elif "timestamp_utc" in df.columns:
-            df = df.rename(columns={"timestamp_utc": "timestamp"})
+LTE_COLUMN_MAP = {
+    "4G max active users DL": "max_active_users_dl",
+    "4G max active users UL": "max_active_users_ul",
 
-    if "base_station" not in df.columns and "base_station_name" in df.columns:
-        df = df.rename(columns={"base_station_name": "base_station"})
-    if "sector" not in df.columns and "cell" in df.columns:
-        df = df.rename(columns={"cell": "sector"})
+    "4G data volume DL": "data_volume_dl",
+    "4G data volume UL": "data_volume_ul",
 
-    if "timestamp" in df.columns:
-        df["timestamp"] = df["timestamp"].apply(parse_timestamp)
-        df = df.dropna(subset=["timestamp"]).copy()
+    "4G max RRC users": "max_rrc_users",
+    "4G RRC users": "rrc_users",
 
-    df["network_type"] = infer_network_type(csv_path)
-    df["source_file"] = os.path.basename(csv_path)
+    "4G RB utilization": "rb_utilization",
 
-    return df.sort_values("timestamp")
+    "4G CQI rank 1": "cqi_rank_1",
+    "4G CQI rank 2": "cqi_rank_2",
+    "4G CQI rank 3": "cqi_rank_3",
+    "4G CQI rank 4": "cqi_rank_4",
+
+    "4G active users UL": "active_users_ul",
+    "4G active users DL": "active_users_dl",
+
+    "4G MIMO rank DL": "mimo_rank_dl",
+}
 
 
-def load_all_events():
-    file_paths = []
+# ============================================================
+# NR / 5G Mapping
+# ============================================================
 
-    if CSV_FILE:
-        file_paths = [CSV_FILE]
+NR_COLUMN_MAP = {
+    "5G max active users DL": "max_active_users_dl",
+    "5G max active users UL": "max_active_users_ul",
+
+    "5G data volume DL": "data_volume_dl",
+    "5G data volume UL": "data_volume_ul",
+
+    "5G max RRC users": "max_rrc_users",
+    "5G RRC users": "rrc_users",
+
+    "5G RB utilization": "rb_utilization",
+
+    "5G CQI rank 1": "cqi_rank_1",
+    "5G CQI rank 2": "cqi_rank_2",
+    "5G CQI rank 3": "cqi_rank_3",
+    "5G CQI rank 4": "cqi_rank_4",
+
+    "5G active users UL": "active_users_ul",
+    "5G active users DL": "active_users_dl",
+
+    "5G MIMO rank DL": "mimo_rank_dl",
+}
+
+
+# ============================================================
+# GSM / 2G Mapping
+# ============================================================
+
+GSM_COLUMN_MAP = {
+    "2G TS available": "ts_available",
+    "2G TS used": "ts_used",
+    "2G TS utilization": "ts_utilization",
+}
+
+
+TECHNOLOGY_COLUMN_MAPS = {
+    "LTE": LTE_COLUMN_MAP,
+    "NR": NR_COLUMN_MAP,
+    "GSM": GSM_COLUMN_MAP,
+}
+
+
+# ============================================================
+# Parse Metadata From Filename
+# ============================================================
+
+def parse_filename_metadata(file_path):
+    filename = Path(file_path).name
+
+    match = FILENAME_PATTERN.match(filename)
+
+    if not match:
+        raise ValueError(
+            f"Unexpected filename format: {filename}"
+        )
+
+    dataset_number = match.group(1)
+    technology = match.group(2)
+    frequency_mhz = int(match.group(3))
+
+    return {
+        "dataset_id": f"Dataset_{dataset_number}",
+        "technology": technology,
+        "frequency_mhz": frequency_mhz,
+        "source_file": filename,
+    }
+
+
+# ============================================================
+# Build Common Column Mapping
+# ============================================================
+
+def get_column_mapping(technology):
+    if technology not in TECHNOLOGY_COLUMN_MAPS:
+        raise ValueError(
+            f"Unsupported technology: {technology}"
+        )
+
+    return {
+        **COMMON_COLUMN_MAP,
+        **TECHNOLOGY_COLUMN_MAPS[technology],
+    }
+
+
+# ============================================================
+# Validate CSV Schema
+#
+# This does NOT clean the data.
+# It only checks that the CSV structure is expected.
+# ============================================================
+
+def validate_csv_schema(fieldnames, technology):
+    if not fieldnames:
+        raise ValueError("CSV file has no header")
+
+    expected_mapping = get_column_mapping(technology)
+
+    expected_columns = set(expected_mapping.keys())
+    actual_columns = set(fieldnames)
+
+    missing_columns = expected_columns - actual_columns
+    unknown_columns = actual_columns - expected_columns
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing columns for {technology}: "
+            f"{sorted(missing_columns)}"
+        )
+
+    if unknown_columns:
+        raise ValueError(
+            f"Unexpected columns for {technology}: "
+            f"{sorted(unknown_columns)}"
+        )
+
+
+# ============================================================
+# Normalize Column Names
+#
+# IMPORTANT:
+# We only rename column names.
+#
+# Values stay exactly as they came from CSV.
+#
+# Examples:
+#
+# ""      stays ""
+# "33.44" stays "33.44"
+# "0"     stays "0"
+# timestamp stays "10/23/2023 14:30"
+#
+# Cleaning happens later in Spark.
+# ============================================================
+
+def normalize_row(raw_row, technology):
+    column_mapping = get_column_mapping(technology)
+
+    normalized = {}
+
+    for raw_column, raw_value in raw_row.items():
+        normalized_column = column_mapping[raw_column]
+
+        normalized[normalized_column] = raw_value
+
+    return normalized
+
+
+# ============================================================
+# Build Cell ID
+#
+# No aggressive cleaning / slug generation here.
+#
+# Example:
+#
+# Site 36 | 2 | LTE | 2100
+#
+# becomes:
+#
+# Site 36|2|LTE|2100
+#
+# ============================================================
+
+def build_cell_id(
+    base_station,
+    sector,
+    technology,
+    frequency_mhz
+):
+    if not base_station:
+        raise ValueError(
+            "Base station is empty"
+        )
+
+    if not sector:
+        raise ValueError(
+            "Sector is empty"
+        )
+
+    return (
+        f"{base_station}|"
+        f"{sector}|"
+        f"{technology}|"
+        f"{frequency_mhz}"
+    )
+
+
+# ============================================================
+# Build Kafka Event
+# ============================================================
+
+def build_event(raw_row, metadata):
+    technology = metadata["technology"]
+
+    normalized_row = normalize_row(
+        raw_row,
+        technology
+    )
+
+    cell_id = build_cell_id(
+        base_station=normalized_row["base_station"],
+        sector=normalized_row["sector"],
+        technology=technology,
+        frequency_mhz=metadata["frequency_mhz"],
+    )
+
+    event = {
+        # Event metadata
+        "event_id": str(uuid.uuid4()),
+
+        "ingestion_timestamp":
+            datetime.now(timezone.utc).isoformat(),
+
+        "schema_version": "1.0",
+
+        # Source metadata
+        "dataset_id": metadata["dataset_id"],
+        "source_file": metadata["source_file"],
+
+        # RAN metadata
+        "technology": metadata["technology"],
+        "frequency_mhz": metadata["frequency_mhz"],
+
+        # Logical cell identifier
+        "cell_id": cell_id,
+
+        # Original measurement fields
+        **normalized_row,
+    }
+
+    return event
+
+
+# ============================================================
+# Kafka Delivery Callback
+# ============================================================
+
+def delivery_report(err, msg):
+    if err is not None:
+        print(
+            f"[DELIVERY FAILED] "
+            f"topic={msg.topic()} "
+            f"error={err}"
+        )
+
     else:
-        file_paths = sorted(glob.glob(os.path.join(DATA_DIR, "*.csv")))
-
-    if not file_paths:
-        raise FileNotFoundError(f"No CSV files found in {DATA_DIR}")
-
-    frames = [collect_events_from_csv(path) for path in file_paths]
-    combined = pd.concat(frames, ignore_index=True, sort=False)
-
-    if "timestamp" not in combined.columns:
-        raise ValueError("No timestamp column found in input CSV files")
-
-    combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
-    combined = combined.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-
-    return combined
+        print(
+            f"[DELIVERED] "
+            f"topic={msg.topic()} "
+            f"partition={msg.partition()} "
+            f"offset={msg.offset()} "
+            f"key={msg.key().decode('utf-8')}"
+        )
 
 
-def send_grouped_events():
-    df = load_all_events()
-    if df.empty:
-        raise ValueError("No valid events were loaded from the source CSV files")
+# ============================================================
+# Create Kafka Producer
+# ============================================================
 
-    previous_timestamp = None
-    for current_timestamp in df["timestamp"].drop_duplicates().tolist():
-        batch = df[df["timestamp"] == current_timestamp].copy()
+def create_kafka_producer():
+    config = {
+        "bootstrap.servers":
+            KAFKA_BOOTSTRAP_SERVERS,
 
-        if previous_timestamp is not None:
-            delta = (current_timestamp - previous_timestamp).total_seconds()
-            print(f"Gap from previous event: {delta} seconds")
-            time.sleep(SIMULATION_INTERVAL)
+        "acks":
+            "all",
 
-        records = []
-        for _, row in batch.iterrows():
-            record = row.to_dict()
-            record["timestamp"] = current_timestamp.isoformat()
-            records.append(record)
+        "enable.idempotence":
+            True,
 
-        event = {
-            "timestamp": current_timestamp.isoformat(),
-            "record_count": len(records),
-            "records": records,
-            "network_types": sorted(batch["network_type"].dropna().unique().tolist()),
-            "source_files": sorted(batch["source_file"].dropna().unique().tolist()),
-        }
+        "client.id":
+            "ran-telemetry-producer",
 
-        key = f"{current_timestamp.strftime('%Y%m%d%H%M%S')}"
-        producer.send(KAFKA_TOPIC, key=key, value=event)
-        print(f"Sent grouped event for {event['timestamp']} with {event['record_count']} records")
-        producer.flush()
-        previous_timestamp = current_timestamp
+        "linger.ms":
+            10,
 
-    producer.close()
-    print("Streaming simulation finished.")
+        "batch.num.messages":
+            1000,
+
+        "message.timeout.ms":
+            300000,
+    }
+
+    return Producer(config)
+
+
+# ============================================================
+# Send One Event
+# ============================================================
+
+def send_event(producer, event):
+    key = event["cell_id"]
+
+    value = json.dumps(
+        event,
+        ensure_ascii=False
+    ).encode("utf-8")
+
+    while True:
+        try:
+            producer.produce(
+                topic=KAFKA_TOPIC,
+                key=key.encode("utf-8"),
+                value=value,
+                callback=delivery_report,
+            )
+
+            break
+
+        except BufferError:
+            print(
+                "[WARNING] Producer queue full. "
+                "Waiting for Kafka..."
+            )
+
+            producer.poll(1.0)
+
+    producer.poll(0)
+
+
+# ============================================================
+# Produce One CSV File
+# ============================================================
+
+def produce_file(
+    producer,
+    file_path,
+    remaining_limit=None
+):
+    metadata = parse_filename_metadata(
+        file_path
+    )
+
+    print()
+    print("=" * 70)
+    print(f"Reading: {metadata['source_file']}")
+    print(
+        f"Technology: "
+        f"{metadata['technology']}"
+    )
+    print(
+        f"Frequency: "
+        f"{metadata['frequency_mhz']} MHz"
+    )
+    print("=" * 70)
+
+    sent_count = 0
+
+    with open(
+        file_path,
+        mode="r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as csv_file:
+
+        reader = csv.DictReader(csv_file)
+
+        validate_csv_schema(
+            reader.fieldnames,
+            metadata["technology"]
+        )
+
+        for row_number, raw_row in enumerate(
+            reader,
+            start=2
+        ):
+            try:
+                event = build_event(
+                    raw_row,
+                    metadata
+                )
+
+                send_event(
+                    producer,
+                    event
+                )
+
+                sent_count += 1
+
+                if SEND_DELAY_SECONDS > 0:
+                    time.sleep(
+                        SEND_DELAY_SECONDS
+                    )
+
+                if (
+                    remaining_limit is not None
+                    and sent_count >= remaining_limit
+                ):
+                    break
+
+            except Exception as exc:
+                print(
+                    f"[ROW ERROR] "
+                    f"file={metadata['source_file']} "
+                    f"row={row_number} "
+                    f"error={exc}"
+                )
+
+    return sent_count
+
+
+# ============================================================
+# Discover CSV Files
+# ============================================================
+
+def discover_files():
+    if SOURCE_FILE:
+        source_path = Path(SOURCE_FILE)
+
+        if not source_path.is_absolute():
+            source_path = DATA_DIR / source_path
+
+        if not source_path.exists():
+            raise FileNotFoundError(
+                f"Source file not found: "
+                f"{source_path}"
+            )
+
+        return [source_path]
+
+    files = sorted(
+        DATA_DIR.glob("Dataset_*.csv")
+    )
+
+    if not files:
+        raise FileNotFoundError(
+            f"No CSV files found in: "
+            f"{DATA_DIR}"
+        )
+
+    return files
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    print()
+    print("RAN Telemetry Kafka Producer")
+    print("=" * 70)
+
+    print(
+        f"Kafka brokers : "
+        f"{KAFKA_BOOTSTRAP_SERVERS}"
+    )
+
+    print(
+        f"Kafka topic   : "
+        f"{KAFKA_TOPIC}"
+    )
+
+    print(
+        f"Data directory: "
+        f"{DATA_DIR}"
+    )
+
+    print(
+        f"Send delay    : "
+        f"{SEND_DELAY_SECONDS} seconds"
+    )
+
+    if MAX_EVENTS > 0:
+        print(
+            f"Max events    : "
+            f"{MAX_EVENTS}"
+        )
+    else:
+        print(
+            "Max events    : unlimited"
+        )
+
+    producer = create_kafka_producer()
+
+    files = discover_files()
+
+    print()
+    print(
+        f"Found {len(files)} CSV file(s)"
+    )
+
+    total_sent = 0
+
+    try:
+        for file_path in files:
+
+            remaining_limit = None
+
+            if MAX_EVENTS > 0:
+                remaining_limit = (
+                    MAX_EVENTS - total_sent
+                )
+
+                if remaining_limit <= 0:
+                    break
+
+            sent_from_file = produce_file(
+                producer,
+                file_path,
+                remaining_limit
+            )
+
+            total_sent += sent_from_file
+
+    except KeyboardInterrupt:
+        print()
+        print(
+            "[STOP] Producer interrupted by user"
+        )
+
+    finally:
+        print()
+        print(
+            "Waiting for pending Kafka messages..."
+        )
+
+        remaining = producer.flush(30)
+
+        print()
+        print("=" * 70)
+
+        print(
+            f"Total events sent: "
+            f"{total_sent}"
+        )
+
+        if remaining == 0:
+            print(
+                "All Kafka messages delivered."
+            )
+        else:
+            print(
+                f"{remaining} message(s) "
+                f"were not delivered."
+            )
+
+        print("=" * 70)
 
 
 if __name__ == "__main__":
-    print(f"Reading raw telemetry files from: {DATA_DIR}")
-    send_grouped_events()
+    main()

@@ -17,7 +17,7 @@ x-kafka-common: &kafka-common
     KAFKA_HEAP_OPTS: "-Xms512m -Xmx1024m"
   networks: [ran-network]
   healthcheck:
-    test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9092'"]
+    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
     interval: 30s
     timeout: 10s
     retries: 8
@@ -48,7 +48,7 @@ x-hadoop-common: &hadoop-common
   environment:
     HADOOP_CONF_DIR: /opt/hadoop/etc/hadoop
   configs:
-    - source: hadoop_core_site_v2
+    - source: hadoop_core_site
       target: /opt/hadoop/etc/hadoop/core-site.xml
     - source: hadoop_hdfs_site
       target: /opt/hadoop/etc/hadoop/hdfs-site.xml
@@ -83,7 +83,7 @@ x-connect-env: &connect-env
 x-connect-common: &connect-common
   image: ran-kafka-connect-hdfs3:3.0.12
   configs:
-    - source: hadoop_core_site_v2
+    - source: hadoop_core_site
       target: /etc/hadoop/core-site.xml
     - source: hadoop_hdfs_site
       target: /etc/hadoop/hdfs-site.xml
@@ -107,7 +107,7 @@ services:
     volumes: [zookeeper1-data:/data, zookeeper1-log:/datalog]
     networks: [ran-network]
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/2181'"]
+      test: ["CMD-SHELL", "zkServer.sh status >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 10s
       retries: 6
@@ -129,7 +129,7 @@ services:
     volumes: [zookeeper2-data:/data, zookeeper2-log:/datalog]
     networks: [ran-network]
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/2181'"]
+      test: ["CMD-SHELL", "zkServer.sh status >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 10s
       retries: 6
@@ -151,7 +151,7 @@ services:
     volumes: [zookeeper3-data:/data, zookeeper3-log:/datalog]
     networks: [ran-network]
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/2181'"]
+      test: ["CMD-SHELL", "zkServer.sh status >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 10s
       retries: 6
@@ -365,7 +365,7 @@ services:
 
   zkfc1:
     <<: *hadoop-common
-    hostname: zkfc1
+    hostname: namenode1
     command: ["/opt/hadoop/bin/hdfs", "zkfc", "-Ddfs.ha.namenode.id=nn1"]
     deploy:
       replicas: 1
@@ -377,7 +377,7 @@ services:
 
   zkfc2:
     <<: *hadoop-common
-    hostname: zkfc2
+    hostname: namenode2
     command: ["/opt/hadoop/bin/hdfs", "zkfc", "-Ddfs.ha.namenode.id=nn2"]
     deploy:
       replicas: 1
@@ -548,7 +548,7 @@ configs:
     file: ./configs/kafka/kafka2.properties
   kafka3_config:
     file: ./configs/kafka/kafka3.properties
-  hadoop_core_site_v2:
+  hadoop_core_site:
     file: ./configs/hadoop/core-site.xml
   hadoop_hdfs_site:
     file: ./configs/hadoop/hdfs-site.xml
@@ -577,4 +577,3 @@ volumes:
   clickhouse-data:
   grafana-data:
   prometheus-data:
-y

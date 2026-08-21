@@ -3,14 +3,7 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'prometheus'
+  - job_name: prometheus
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ["prometheus:9090"]
 
-  - job_name: 'kafka'
-    static_configs:
-      - targets: ['kafka1:9092', 'kafka2:9092', 'kafka3:9092', 'kafka4:9092', 'kafka5:9092']
-
-  - job_name: 'clickhouse'
-    static_configs:
-      - targets: ['clickhouse:8123']

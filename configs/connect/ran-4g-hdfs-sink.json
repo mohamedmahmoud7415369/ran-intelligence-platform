@@ -1,0 +1,30 @@
+{
+  "connector.class": "io.confluent.connect.hdfs3.Hdfs3SinkConnector",
+  "tasks.max": "2",
+  "topics": "ran-4g-demo",
+
+  "store.url": "hdfs://ran-ha",
+  "hadoop.conf.dir": "/etc/hadoop",
+
+  "format.class": "io.confluent.connect.hdfs3.json.JsonFormat",
+  "storage.class": "io.confluent.connect.hdfs3.storage.HdfsStorage",
+  "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
+
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+
+  "topics.dir": "ran-4g-demo-data",
+  "logs.dir": "ran-4g-demo-logs",
+  "flush.size": "1000",
+  "rotate.interval.ms": "60000",
+  "schema.compatibility": "NONE",
+
+  "confluent.topic.bootstrap.servers": "kafka1:9092,kafka2:9092,kafka3:9092",
+  "confluent.topic.replication.factor": "3",
+
+  "errors.tolerance": "all",
+  "errors.deadletterqueue.topic.name": "ran-telemetry-dlq",
+  "errors.deadletterqueue.topic.replication.factor": "3",
+  "errors.log.enable": "true"
+}

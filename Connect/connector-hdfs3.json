@@ -1,0 +1,39 @@
+{
+  "connector.class": "io.confluent.connect.hdfs3.Hdfs3SinkConnector",
+  "tasks.max": "3",
+  "topics": "ran-telemetry",
+
+  "store.url": "hdfs://ran-ha",
+  "hadoop.conf.dir": "/etc/hadoop",
+  "hdfs.authentication.kerberos": "false",
+
+  "storage.class": "io.confluent.connect.hdfs3.storage.HdfsStorage",
+  "format.class": "io.confluent.connect.hdfs3.json.JsonFormat",
+  "topics.dir": "/data/raw",
+  "logs.dir": "/data/_connect-wal/ran-telemetry",
+  "flush.size": "5000",
+  "rotate.schedule.interval.ms": "300000",
+
+  "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
+  "partition.duration.ms": "3600000",
+  "path.format": "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH",
+  "locale": "en",
+  "timezone": "UTC",
+  "timestamp.extractor": "Record",
+
+  "schema.compatibility": "NONE",
+  "hive.integration": "false",
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+
+  "errors.tolerance": "all",
+  "errors.log.enable": "true",
+  "errors.log.include.messages": "true",
+  "errors.deadletterqueue.topic.name": "ran-telemetry-dlq",
+  "errors.deadletterqueue.topic.replication.factor": "3",
+  "errors.deadletterqueue.context.headers.enable": "true",
+
+  "confluent.topic.bootstrap.servers": "kafka1:9092,kafka2:9092,kafka3:9092",
+  "confluent.topic.replication.factor": "3"
+}
